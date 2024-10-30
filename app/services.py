@@ -1,9 +1,12 @@
 import tempfile
 from fastapi import UploadFile, HTTPException
-from langchain_groq import ChatGroq
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
-from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_groq import ChatGroq
+from typing import List, Dict, Any # Ensure you have these imports
+from typing import TypedDict, Optional
+import json
 
 # Set up the credentials for the new model
 GROQ_API_KEY = "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"
@@ -13,74 +16,130 @@ GROQ_MODEL_ID = "llama-3.1-70b-versatile"
 llm = ChatGroq(model=GROQ_MODEL_ID, api_key=GROQ_API_KEY)
 
 
-# Define the state of the graph
 class ResumeState(TypedDict):
-    resume_text: Annotated[str, "The extracted resume text"]
-    job_description: Annotated[str, "The job description"]
-    score: Annotated[float, "Matching score for the resume"]
-    description: Annotated[str, "Analysis of the resume"]
-    recommendation_status: Annotated[str, "Whether the candidate is recommended or not"]
+    resume_text: str
+    job_description: str
+    score: float
+    is_recommended: bool
+    detailed_analysis: str
+    recommendation_status: str
 
+def extract_score_from_response(response_text: str) -> float:
+    """Extract numerical score from LLM response with robust error handling"""
+    try:
+        # Remove any non-numeric characters except decimal points
+        cleaned_text = ''.join(char for char in response_text if char.isdigit() or char == '.')
+        # Convert to float and ensure it's between 0 and 100
+        score = float(cleaned_text)
+        return min(max(score, 0), 100)
+    except (ValueError, TypeError):
+        print(f"Warning: Could not parse score from response: {response_text}")
+        return 0.0
+def calculate_match_score(state: ResumeState) -> ResumeState:
+    """Calculate only the match score between resume and job description"""
+    score_prompt = f"""As an expert resume analyzer, calculate a percentage match score (0-100) between this resume and job description.
+    Consider only relevant skills, experience, and qualifications.
 
-# Function to analyze the resume
-def analyze_resume(state: ResumeState) -> ResumeState:
-    score_prompt = f"""Act like a percentage calculator and provide only the integer value based on the given job details:
     Job Description: {state['job_description']}
     Resume Text: {state['resume_text']}
-    Please analyze in detail and provide the percentage in integer with accuracy. only integer value return not anything else 
+
+    Return only an integer between 0 and 100 representing the match percentage.
     """
+
     score_output = llm.invoke(score_prompt)
-    score = float(score_output.content.strip())
-
-    description_prompt = f"""Analyze the following resume for the given job description:
-    Job Description: {state['job_description']}
-    Resume Text: {state['resume_text']}
-
-    Please do a detailed analysis of the resume's fit for the job and provide a short comparison of the job details and the candidate's resume.
-    """
-    description_output = llm.invoke(description_prompt)
-    description = description_output.content.strip()
-
-    recommendation_status = "Recommended" if score >= 85 else "Not Recommended"
+    try:
+        score = extract_score_from_response(score_output.content)
+        is_recommended = score >= 80
+    except ValueError:
+        score = 0
+        is_recommended = False
 
     return {
-        **state,  # Include all existing state keys
+        **state,
         "score": score,
-        "description": description,
+        "is_recommended": is_recommended
+    }
+
+
+def perform_detailed_analysis(state: ResumeState) -> ResumeState:
+    """Perform detailed analysis based on the calculated score"""
+
+    analysis_prompt = f"""As an expert resume analyzer, provide a detailed analysis of this candidate's fit for the role.
+    The candidate received a match score of {state['score']}% and is {"recommended" if state['is_recommended'] else "not recommended"}.
+
+    Job Description: {state['job_description']}
+    Resume Text: {state['resume_text']}
+
+    Please provide a detailed analysis covering:
+    1. Key matching qualifications and skills
+    2. Missing or mismatched requirements
+    3. Relevant experience alignment
+    4. Areas where the candidate exceeds requirements
+    5. Specific justification for the recommendation decision
+
+    Structure your analysis in clear sections with specific examples from both the resume and job description.
+    """
+
+    analysis_output = llm.invoke(analysis_prompt)
+    detailed_analysis = analysis_output.content.strip()
+
+    recommendation_status = "Recommended" if state['is_recommended'] else "Not Recommended"
+
+    return {
+        **state,
+        "detailed_analysis": detailed_analysis,
         "recommendation_status": recommendation_status
     }
 
 
-# Create the graph
-workflow = StateGraph(ResumeState)
+def create_resume_workflow() -> StateGraph:
+    """Create and return the resume analysis workflow"""
+    workflow = StateGraph(ResumeState)
 
-# Add node for resume analysis
-workflow.add_node("analyze_resume", analyze_resume)
+    # Add nodes
+    workflow.add_node("calculate_score", calculate_match_score)
+    workflow.add_node("perform_detailed_analysis", perform_detailed_analysis)
 
-# Add edges
-workflow.add_edge("analyze_resume", END)
+    # Add edges
+    workflow.add_edge("calculate_score", "perform_detailed_analysis")
+    workflow.add_edge("perform_detailed_analysis", END)
 
-# Set the entry point
-workflow.set_entry_point("analyze_resume")
+    # Set entry point
+    workflow.set_entry_point("calculate_score")
 
-# Compile the graph
-graph = workflow.compile()
+    return workflow.compile()
 
 
-def run_resume_analysis(resume_text: str, job_description: str):
+def run_resume_analysis(resume_text: str, job_description: str) -> dict:
+    """Run the resume analysis workflow with error handling"""
     try:
-        result = graph.invoke({
+        graph = create_resume_workflow()
+
+        initial_state = {
             "resume_text": resume_text,
             "job_description": job_description,
             "score": 0.0,
-            "description": "",
+            "is_recommended": False,
+            "detailed_analysis": "",  # Keep this as is for internal state
             "recommendation_status": ""
-        })
-        return {"score": result["score"], "recommendation_status":result['recommendation_status'], "description": result["description"]}
-    except Exception as e:
-        print(f"Error running workflow: {e}")
-        return None
+        }
 
+        result = graph.invoke(initial_state)
+
+        # Map the internal state names to your API response model names
+        return {
+            "score": result["score"],
+            "recommendation_status": result["recommendation_status"],
+            "description": result["detailed_analysis"]  # Here we map detailed_analysis to description
+        }
+
+    except Exception as e:
+        print(f"Error running resume analysis workflow: {e}")
+        return {
+            "score": 0.0,
+            "recommendation_status": "error",
+            "description": f"Error analyzing resume: {str(e)}"
+        }
 
 async def analyze_resume_service(file: UploadFile, job_description:str):
     # Load and process the resume based on file type
@@ -140,4 +199,77 @@ async def analyze_resume_service(file: UploadFile, job_description:str):
     #     recommendation = "Not recommended. " + description
     # else:
     #     recommendation = "Recommended. " + description
+
+def analyze_personality(questions_data):
+    llm = ChatGroq(model=GROQ_MODEL_ID, api_key=GROQ_API_KEY)
+
+    # Create a simplified data string focusing on questions and answers
+    formatted_responses = "\n".join([
+        f"Q{item['id']}: {item['question']} - Answer: {item['answer']}/5"
+        for item in questions_data
+    ])
+
+    # Create a focused prompt for the LLM
+    system_prompt = """You are a personality assessment analyzer. Analyze the given responses and calculate percentages for the Big Five personality traits:
+    1. Openness - Questions about creativity, curiosity, and new experiences
+    2. Conscientiousness - Questions about organization, planning, and discipline
+    3. Extraversion - Questions about social interaction and energy
+    4. Agreeableness - Questions about cooperation and consideration for others
+    5. Neuroticism - Questions about stress sensitivity and emotional stability
+
+    Return ONLY a JSON object with the five traits and their percentage scores. Example:
+    {
+        "Openness": 75,
+        "Conscientiousness": 80,
+        "Extraversion": 60,
+        "Agreeableness": 85,
+        "Neuroticism": 45
+    }"""
+
+    # Map relevant question IDs to traits for focused analysis
+    trait_mapping = """
+    Key questions for each trait:
+    - Openness: 15, 16, 17, 18, 19 (creativity, curiosity, openness to experiences)
+    - Conscientiousness: 27, 28, 29, 30 (discipline, organization, planning)
+    - Extraversion: 8, 9, 10, 11, 12 (social interaction, energy)
+    - Agreeableness: 20, 21, 22, 23, 24, 25, 26 (cooperation, consideration)
+    - Neuroticism: 1, 2, 3, 4, 5, 6, 7 (emotional stability, stress response)
+    """
+
+    # Get analysis from LLM
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"""
+            Analyze these personality assessment responses:
+            {formatted_responses}
+
+            Question groupings for reference:
+            {trait_mapping}
+
+            Provide the personality trait percentages based on the answers.
+        """)
+    ]
+
+    try:
+        response = llm.invoke(messages)
+
+        # Extract the JSON part from the response
+        start_idx = response.content.find('{')
+        end_idx = response.content.rfind('}') + 1
+
+        # Make sure the response contains valid JSON
+        json_string = response.content[start_idx:end_idx].strip()
+
+        # Validate and load JSON
+        if json_string:
+            results = json.loads(json_string)
+        else:
+            raise ValueError("No valid JSON found in the response.")
+
+        return results
+
+    except json.JSONDecodeError as json_err:
+        return f"JSON decoding error: {str(json_err)}"
+    except Exception as e:
+        return f"Error analyzing personality: {str(e)}"
 

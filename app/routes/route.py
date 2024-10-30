@@ -1,8 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.params import Form
 
-from ..schemas.schema import AnalysisResult,JobDescription
-from ..services import analyze_resume_service
+from ..schemas.schema import AnalysisResult,Questionnaire
+from ..services import analyze_resume_service,analyze_personality
 
 router = APIRouter()
 
@@ -15,3 +15,11 @@ async def analyze_resume(
 ):
     # Pass job_description and file to the service
     return await analyze_resume_service(file, job_description)
+
+@router.post("/analyz_personality/")
+async def personality_analyzer(questions: Questionnaire):
+
+    # Assuming `questions` is a list of Question objects
+    questions_data = [question.model_dump() for question in questions.questions]
+    print(questions_data)
+    return  analyze_personality(questions_data)
