@@ -8,7 +8,7 @@ from typing import List, Dict, Any # Ensure you have these imports
 from typing import TypedDict, Optional
 import json
 import pdfplumber
-from langchain_community.embeddings import SentenceTransformerEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.vectorstores import FAISS
@@ -20,7 +20,8 @@ GROQ_MODEL_ID = "llama-3.1-70b-versatile"
 
 # Initialize SentenceTransformer model
 model_name = "sentence-transformers/all-MiniLM-L6-v2"
-embeddings = SentenceTransformerEmbeddings(model_name=model_name)
+embeddings = HuggingFaceEmbeddings(model_name=model_name)
+
 
 # Directory and file configuration
 PDF_DIR = "/home/datics/data_pdf/"  # Replace with your PDF directory path
@@ -317,7 +318,9 @@ def get_response(messages):
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are an expert assistant specializing in interpreting and clarifying company policy documents.
 
-            Your task is to analyze the provided context and respond to user questions with precision and clarity. Always reference the relevant sections or page numbers from the policy document to ensure your answers are well-supported.
+            Your task is to analyze the provided context and respond to user questions with precision and clarity. 
+            Always reference the relevant sections or page numbers from the policy document to ensure your answers are well-supported.
+             if you not get any relevent data to any query then givve the answer like i do not know 
 
             Please format your response as follows:
             1. **Direct Answer**: Provide a  answer to the user's question, directly addressing their inquiry.
