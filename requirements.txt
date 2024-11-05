@@ -100,3 +100,4 @@ torch
 tqdm
 transformers
 triton
+langchain_huggingface
