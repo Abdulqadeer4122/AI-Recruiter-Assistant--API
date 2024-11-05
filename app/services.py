@@ -7,10 +7,26 @@ from langchain_groq import ChatGroq
 from typing import List, Dict, Any # Ensure you have these imports
 from typing import TypedDict, Optional
 import json
-
+import pdfplumber
+from langchain_community.embeddings import SentenceTransformerEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.vectorstores import FAISS
+from langchain_groq import ChatGroq
+from langchain.chains import LLMChain
 # Set up the credentials for the new model
 GROQ_API_KEY = "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"
 GROQ_MODEL_ID = "llama-3.1-70b-versatile"
+
+# Initialize SentenceTransformer model
+model_name = "sentence-transformers/all-MiniLM-L6-v2"
+embeddings = SentenceTransformerEmbeddings(model_name=model_name)
+
+# Directory and file configuration
+PDF_DIR = "/home/datics/data_pdf/"  # Replace with your PDF directory path
+PDF_FILE_NAME = "policy_document.pdf"  # Replace with your PDF file name
+VECTOR_STORE_PATH = "faiss_db"
+
 
 # Create an instance of the Ollama model with the GROQ API key
 llm = ChatGroq(model=GROQ_MODEL_ID, api_key=GROQ_API_KEY)
@@ -162,44 +178,6 @@ async def analyze_resume_service(file: UploadFile, job_description:str):
     response = run_resume_analysis(resume_text=resume_text, job_description=job_description)
     return response
 
-
-
-
-
-
-
-
-
-
-
-    # # Create the prompt for the LLM
-    # prompt = f"""
-    # Analyze the following resume based on the job description provided:
-    #
-    # Job Title: {job['title']}
-    # Job Description: {job['job_description']}
-    # Key Responsibilities: {job['key_responsibilities']}
-    # Qualifications Required: {job['qualifications_required']}
-    #
-    # Resume Text: {resume_text}
-    #
-    # Provide a matching score from 0 to 100 and a detailed analysis of the resume's fit for this job.
-    # """
-    #
-    # result = llm.invoke(prompt)
-    # # Extract score and description from the LLM response
-    # try:
-    #     analysis = result.content
-    #     score = float(analysis.split('Score:')[1].split('\n')[0].strip().replace("/100**","").replace("**",''))
-    #     description = analysis.split('Detailed Analysis:')[1].strip()
-    # except Exception as e:
-    #     raise HTTPException(status_code=500, detail="Error processing LLM output: " + str(e))
-    # # Provide recommendation based on the score
-    # if score < 80:
-    #     recommendation = "Not recommended. " + description
-    # else:
-    #     recommendation = "Recommended. " + description
-
 def analyze_personality(questions_data):
     llm = ChatGroq(model=GROQ_MODEL_ID, api_key=GROQ_API_KEY)
 
@@ -272,4 +250,112 @@ def analyze_personality(questions_data):
         return f"JSON decoding error: {str(json_err)}"
     except Exception as e:
         return f"Error analyzing personality: {str(e)}"
+
+
+
+
+
+#///////////////////////////
+
+# Pydantic model for messages
+import re
+
+
+def minimal_cleaning(text):
+    text = re.sub(r'(?<=\w)(?=[A-Z])', ' ', text)
+    return ' '.join(text.split())
+
+
+def process_pdf(pdf_file_path):
+    pages = []
+    with pdfplumber.open(pdf_file_path) as pdf:
+        for i, page in enumerate(pdf.pages):
+            raw_text = page.extract_text()
+            if raw_text:
+                cleaned_text = minimal_cleaning(raw_text)
+                pages.append({"page_number": i + 1, "content": cleaned_text})
+
+    return pages
+
+
+def get_chunks(pages):
+    documents = "\n\n".join(page["content"] for page in pages)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        separators=["\n\n", "\n", ".", "!", "?", ",", " "]
+    )
+    chunks = text_splitter.split_text(documents)
+    return chunks
+
+
+def create_vector_store(chunks):
+    vector_store = FAISS.from_texts(chunks, embeddings)
+    vector_store.save_local("faiss_db")
+
+
+def load_vector_store():
+    return FAISS.load_local("faiss_db", embeddings, allow_dangerous_deserialization=True)
+
+
+def get_response(messages):
+    vector_store = load_vector_store()
+    user_query=messages[-1]['content']
+    question_embedding = embeddings.embed_query(user_query)
+    relevant_docs = vector_store.similarity_search_by_vector(question_embedding, k=4)
+    # Combine previous messages into context
+    combined_context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
+    context_with_metadata = []
+    for doc in relevant_docs:
+        page_num = doc.metadata.get("page_number", "unknown")
+        content = getattr(doc, 'content', None) or getattr(doc, 'page_content', None) or getattr(doc, 'text', None)
+        if content is not None:
+            context_with_metadata.append(f"[Page {page_num}]: {content}")
+
+    context = "\n\n".join(context_with_metadata)
+    print(context)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are an expert assistant specializing in interpreting and clarifying company policy documents.
+
+            Your task is to analyze the provided context and respond to user questions with precision and clarity. Always reference the relevant sections or page numbers from the policy document to ensure your answers are well-supported.
+
+            Please format your response as follows:
+            1. **Direct Answer**: Provide a  answer to the user's question, directly addressing their inquiry.
+            2. **Supporting Details**: Offer any additional context, explanations, or references to specific sections or pages within the policy document that substantiate your answer.
+
+            **Context**:
+            {context}
+            """),
+        ("human", "{combined_context}")
+    ])
+
+    chain = LLMChain(llm=llm, prompt=prompt)
+    response = chain.invoke({"combined_context": combined_context,"context": context})
+
+    return response["text"]
+
+import os
+# Initialize vector store at startup
+def initialize_vector_store():
+    pdf_file_path = os.path.join(PDF_DIR, PDF_FILE_NAME)
+
+    # Check if the vector store exists
+    if not os.path.exists(VECTOR_STORE_PATH):
+        print("Vector store not found. Processing PDF...")
+
+        # Process the PDF file
+        pages = process_pdf(pdf_file_path)
+
+        # Get chunks from the processed pages
+        chunks = get_chunks(pages)
+
+        # Create the vector store with the chunks
+        create_vector_store(chunks)
+    else:
+        print("Vector store loaded successfully.")
+
+
+# Call the initialization function on startup
+initialize_vector_store()
+
 

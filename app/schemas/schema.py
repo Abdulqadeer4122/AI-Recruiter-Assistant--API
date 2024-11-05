@@ -13,4 +13,11 @@ class Question(BaseModel):
 
 class Questionnaire(BaseModel):
     questions: List[Question]
+class Message(BaseModel):
+    role: str
+    content: str
+
+
+class MessageList(BaseModel):
+    messages: List[Message]
 
